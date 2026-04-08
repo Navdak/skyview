@@ -1,0 +1,168 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ===============================================================
+    // Assumed Data Model
+    // ===============================================================
+    //
+    // Collection: users
+    // Document ID: {userId} (Auth UID)
+    // Fields:
+    //   - uid: string (required)
+    //   - email: string (required, email format)
+    //   - displayName: string (optional)
+    //   - photoURL: string (optional)
+    //   - role: string (required, ['admin', 'customer'])
+    //   - createdAt: timestamp (optional)
+    //
+    // Collection: menuItems
+    // Document ID: auto-generated
+    // Fields:
+    //   - name: string (required)
+    //   - description: string (optional)
+    //   - price: number (required, positive)
+    //   - category: string (required)
+    //   - imageUrl: string (optional)
+    //   - isAvailable: bool (optional)
+    //   - isPopular: bool (optional)
+    //   - createdAt: timestamp (optional)
+    //
+    // Collection: reservations
+    // Document ID: auto-generated
+    // Fields:
+    //   - userId: string (optional, owner UID)
+    //   - customerName: string (required)
+    //   - customerEmail: string (required, email format)
+    //   - customerPhone: string (optional)
+    //   - date: string (required, YYYY-MM-DD)
+    //   - time: string (required)
+    //   - guests: number (required, positive)
+    //   - status: string (required, ['pending', 'confirmed', 'cancelled'])
+    //   - notes: string (optional)
+    //   - createdAt: timestamp (optional)
+    //
+    // Collection: reviews
+    // Document ID: auto-generated
+    // Fields:
+    //   - userId: string (optional)
+    //   - userName: string (required)
+    //   - rating: number (required, 1-5)
+    //   - comment: string (required)
+    //   - createdAt: timestamp (optional)
+    //
+    // ===============================================================
+
+    // ===============================================================
+    // Helper Functions
+    // ===============================================================
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'admin' ||
+         (request.auth.token.email == "navdak86@gmail.com" && request.auth.token.email_verified == true));
+    }
+
+    function isValidEmail(email) {
+      return email is string && email.matches("^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}$");
+    }
+
+    function hasOnlyAllowedFields(fields) {
+      return request.resource.data.keys().hasOnly(fields);
+    }
+
+    // ===============================================================
+    // Domain Validators
+    // ===============================================================
+
+    function isValidUser(data) {
+      return hasOnlyAllowedFields(['uid', 'email', 'displayName', 'photoURL', 'role', 'createdAt']) &&
+             data.uid is string && data.email is string && isValidEmail(data.email) &&
+             data.role in ['admin', 'customer'];
+    }
+
+    function isValidMenuItem(data) {
+      return hasOnlyAllowedFields(['name', 'description', 'price', 'category', 'imageUrl', 'isAvailable', 'isPopular', 'createdAt']) &&
+             data.name is string && data.name.size() > 0 && data.name.size() < 100 &&
+             data.price is number && data.price >= 0 &&
+             data.category is string;
+    }
+
+    function isValidReservation(data) {
+      return hasOnlyAllowedFields(['userId', 'customerName', 'customerEmail', 'customerPhone', 'date', 'time', 'guests', 'status', 'notes', 'createdAt']) &&
+             data.customerName is string && data.customerName.size() > 0 &&
+             data.customerEmail is string && isValidEmail(data.customerEmail) &&
+             data.guests is number && data.guests > 0 &&
+             data.status in ['pending', 'confirmed', 'cancelled'];
+    }
+
+    function isValidReview(data) {
+      return hasOnlyAllowedFields(['userId', 'userName', 'rating', 'comment', 'createdAt']) &&
+             data.userName is string && data.rating is number && data.rating >= 1 && data.rating <= 5 &&
+             data.comment is string && data.comment.size() > 0 && data.comment.size() < 1000;
+    }
+
+    function isValidOrder(data) {
+      return hasOnlyAllowedFields(['userId', 'customerName', 'customerEmail', 'customerPhone', 'items', 'totalAmount', 'status', 'deliveryAddress', 'createdAt']) &&
+             data.customerName is string && data.customerName.size() > 0 &&
+             data.items is list && data.items.size() > 0 &&
+             data.totalAmount is number && data.totalAmount >= 0 &&
+             data.status in ['pending', 'preparing', 'delivered', 'cancelled'];
+    }
+
+    // ===============================================================
+    // Rules
+    // ===============================================================
+
+    match /users/{userId} {
+      allow read: if isOwner(userId) || isAdmin();
+      allow create: if isAuthenticated() && isValidUser(request.resource.data) && 
+                    ((isOwner(userId) && request.resource.data.role == 'customer') || isAdmin());
+      allow update: if isAuthenticated() && isValidUser(request.resource.data) && 
+                    ((isOwner(userId) && request.resource.data.role == resource.data.role) || isAdmin());
+    }
+
+    match /menuItems/{itemId} {
+      allow read: if true;
+      allow write: if isAdmin() && isValidMenuItem(request.resource.data);
+    }
+
+    match /reservations/{reservationId} {
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if isValidReservation(request.resource.data) && 
+                    (!('userId' in request.resource.data) || request.resource.data.userId == request.auth.uid);
+      allow update: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid && 
+                    request.resource.data.status == resource.data.status); // Users can't change status themselves
+      allow delete: if isAdmin();
+    }
+
+    match /reviews/{reviewId} {
+      allow read: if true;
+      allow create: if isAuthenticated() && isValidReview(request.resource.data) && 
+                    request.resource.data.userId == request.auth.uid;
+      allow update, delete: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+    }
+
+    match /orders/{orderId} {
+      allow read: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid);
+      allow create: if isValidOrder(request.resource.data) && 
+                    (!('userId' in request.resource.data) || request.resource.data.userId == request.auth.uid);
+      allow update: if isAdmin() || (isAuthenticated() && resource.data.userId == request.auth.uid && 
+                    request.resource.data.status == resource.data.status); // Users can't change status
+      allow delete: if isAdmin();
+    }
+
+    match /{path=**} {
+      allow read, write: if false;
+    }
+  }
+}
